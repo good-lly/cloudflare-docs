@@ -406,6 +406,7 @@
 /containers/architecture/ /containers/platform-details/architecture/ 301
 /containers/durable-object-methods/ /containers/platform-details/durable-object-methods/ 301
 /containers/platform-details/ /containers/platform-details/architecture/ 301
+/containers/platform-details/outbound-workers/ /containers/platform-details/outbound-traffic/ 301
 # D1
 /d1/client-api/ /d1/worker-api/ 301
 /d1/build-with-d1/d1-client-api/ /d1/worker-api/ 301

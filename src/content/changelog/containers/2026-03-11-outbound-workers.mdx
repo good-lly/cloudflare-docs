@@ -1,48 +1,50 @@
 ---
-title: Egress control and improved Workers integration for Containers and Sandboxes
-description: Intercept and control outbound HTTP from containers using Workers as programmable egress proxies.
+title: Easily connect Containers and Sandboxes to Workers
+description: Use outbound Workers to give containers access to KV, R2, D1, and other Workers bindings without changing application code.
 products:
   - containers
 date: 2026-03-11
 ---
 
-[Containers](/containers/) and [Sandboxes](/sandbox/) now support outbound Workers — programmable egress proxies that intercept HTTP requests leaving your container. Use them to inject credentials, restrict traffic, add networking observability, or route requests to other Workers bindings, all without modifying code running inside a container.
+[Containers](/containers/) and [Sandboxes](/sandbox/) now support connecting directly to Workers over HTTP. This allows you to call Workers
+functions and [bindings](/workers/runtime-apis/bindings/), like KV or R2, from specific hostnames.
 
-## Networking controls
+## Run Worker code
 
-Allow or deny traffic based on domain, IP, HTTP method, or more. The outbound Worker always runs on the same machine as the container with minimal added latency.
+Define an `outbound` function to capture any HTTP request. For mapping specific hostnames or IPs to
+outbound handlers, you can use `outboundByHost`. This allows you to run any Worker code behind a hostname
+of your choice.
 
 ```js
 export class MyApp extends Sandbox {
 	static outbound = (request, env, ctx) => {
-		if (request.method !== "GET") {
-			return new Response("Method Not Allowed", { status: 405 });
-		}
-		return fetch(request);
+		// you can run arbitrary functions defined in your Worker on any HTTP request
+		return await someWorkersFunction(request.body);
 	};
-}
-```
 
-## Secure auth
-
-Inject credentials at the egress layer. The untrusted workload never sees the secret. This is especially useful for agentic workloads where you need to give a sandbox access to services without exposing keys to an untrusted workload.
-
-```js
-export class MyApp extends Sandbox {
 	static outboundByHost = {
-		"api.internal.example.com": async (request, env, ctx) => {
-			const headers = new Headers(request.headers);
-			headers.set("x-auth-token", env.SECRET);
-			return fetch(new Request(request, { headers }));
+		"my.worker": async (request, env, ctx) => {
+			// you can run arbitrary functions defined in your Worker from this hostname
+			return await anotherFunction(request.body);
 		},
 	};
 }
 ```
 
-## Improved integrations
+Requests from the container to `http://my.worker` will run the function defined in `outboundByHost`,
+and other HTTP requests will run the `outbound` handler. These handlers run entirely inside the Workers runtime,
+outside of the container sandbox. Both `outbound` and `outboundByHost` work on the `Sandbox` or `Container` classes.
 
-Access [Workers bindings](/workers/runtime-apis/bindings/) on hostnames from within a Sandbox or Container. You can now easily
-make calls to KV, R2, or other services without manually managing access tokens.
+:::note[TLS support coming soon]
+Containers and Sandboxes currently only intercept HTTP traffic. HTTPS interception is coming soon. This will enable using Workers as a transparent proxy for credential injection.
+
+Even though this is just using HTTP, traffic is secure and Container-to-Worker communication happens on the same machine.
+You can also upgrade to TLS from the Worker itself if needed.
+:::
+
+## Access Workers bindings
+
+Each handler has access to `env`, so it can call any binding configured in Wrangler config. Code inside the container makes a standard HTTP request to that hostname and the outbound Worker translates it into a binding call.
 
 ```js
 export class MyApp extends Sandbox {
@@ -52,39 +54,31 @@ export class MyApp extends Sandbox {
 			const value = await env.KV.get(key);
 			return new Response(value ?? "", { status: value ? 200 : 404 });
 		},
+		"my.r2": async (request, env, ctx) => {
+			const key = new URL(request.url).pathname.slice(1);
+			const object = await env.BUCKET.get(key);
+			return new Response(object?.body ?? "", { status: object ? 200 : 404 });
+		},
 	};
 }
 ```
 
-## Dynamic proxies
+Now, from inside the container sandbox, `curl http://my.kv/some-key` will access [Workers KV](/kv) and `curl http://my.r2/some-object` will access [R2](/r2/).
 
-Use `outboundHandlers` with `setOutboundHandler()` to swap egress policies at runtime. This lets you open the network for setup, then lock it down before running untrusted code.
+## Access Durable Object state
+
+Use `ctx.containerId` to get the container's ID, then interact with its state or call methods on a Container's Durable Object.
 
 ```js
-export class MyApp extends Sandbox {
-	static outboundHandlers = {
-		allowHosts: async (request, env, ctx) => {
-			const { hostname } = new URL(request.url);
-			return ctx.params.allowedHostnames.includes(hostname)
-				? fetch(request)
-				: new Response("Forbidden", { status: 403 });
+export class MyContainer extends Container {
+	static outboundByHost = {
+		"get-state.do": async (request, env, ctx) => {
+			const id = env.MY_CONTAINER.idFromString(ctx.containerId);
+			const stub = env.MY_CONTAINER.get(id);
+			return stub.getStateForKey(request.body);
 		},
-		blockAll: async () => new Response("Forbidden", { status: 403 }),
 	};
 }
-
-// In your Worker
-const sandbox = await env.SANDBOX.getByName("agent-session");
-await sandbox.setOutboundHandler("allowHosts", {
-	allowedHostnames: ["registry.npmjs.org", "github.com"],
-});
-await sandbox.exec("npm install");
-await sandbox.setOutboundHandler("blockAll");
 ```
 
-:::note[TLS support coming soon]
-Outbound Workers currently intercept HTTP traffic only. HTTPS interception requires a platform-managed certificate authority to decrypt and re-encrypt traffic. This is in progress and will be documented when available. Until then, to force all traffic through an outbound Worker, you can set `enableInternet: false` and use `outbound`
-to intercept all traffic, and optionally upgrade to TLS from inside the Worker.
-:::
-
-Refer to [Outbound Workers](/containers/platform-details/outbound-workers/) for full documentation and examples.
+Refer to [Control outbound traffic](/containers/platform-details/outbound-traffic/) for Containers and [Control outbound traffic](/sandbox/guides/outbound-workers/) for Sandboxes.

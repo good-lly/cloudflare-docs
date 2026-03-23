@@ -1,5 +1,5 @@
 ---
-title: Outbound Workers
+title: Control outbound traffic
 pcx_content_type: concept
 sidebar:
   order: 50
@@ -10,22 +10,11 @@ import { TypeScriptExample, Render } from "~/components";
 
 Outbound Workers are Workers that intercept HTTP requests made by your container. They act as programmable egress proxies, running on the same machine as the container with access to all Workers bindings.
 
-Use outbound Workers to:
+Use outbound Workers to route requests to Workers functions and their bindings (KV, R2, Durable Objects, etc.)
 
-- Inject credentials or headers without exposing secrets to untrusted code
-- Log or audit outbound requests
-- Restrict which methods or domains are allowed
-- Route requests to internal Workers bindings (KV, R2, Durable Objects, etc.)
-- Swap egress policies at runtime
+## Defining outbound handlers
 
-:::note[TLS support coming soon]
-Outbound Workers currently intercept HTTP traffic only. HTTPS interception requires a platform-managed certificate authority to decrypt and re-encrypt traffic. This is in progress and will be documented when available. Until then, to force all traffic through an outbound Worker, you can set `enableInternet: false` and use `outbound`
-to intercept all traffic, and optionally upgrade to TLS from inside the Worker.
-:::
-
-## Define an outbound handler
-
-Use `outbound` to intercept all outbound HTTP traffic regardless of destination:
+Use `outbound` to intercept outbound HTTP traffic regardless of destination:
 
 ```js
 import { Container } from "@cloudflare/containers";
@@ -41,6 +30,13 @@ export class MyContainer extends Container {
 }
 ```
 
+:::note[TLS support coming soon]
+Currently, only HTTP traffic is intercepted. HTTPS interception is in progress and will be documented when available.
+
+Even though this is using HTTP, traffic is secure and Container-to-Worker communication happens on the same machine.
+You can also upgrade to TLS from the Worker itself if needed.
+:::
+
 Use `outboundByHost` to map specific domain names or IP addresses to handler functions:
 
 ```js
@@ -48,16 +44,15 @@ import { Container } from "@cloudflare/containers";
 
 export class MyContainer extends Container {
 	static outboundByHost = {
-		"api.internal.example.com": async (request, env, ctx) => {
-			const headers = new Headers(request.headers);
-			headers.set("x-auth-token", env.SECRET);
-			return fetch(new Request(request, { headers }));
+		"my.worker": async (request, env, ctx) => {
+			// Run arbitrary Workers logic from this hostname
+			return await someWorkersFunction(request.body);
 		},
 	};
 }
 ```
 
-Any HTTP request from the container to `api.internal.example.com` is routed through the handler. The secret is injected by the Worker — the container code never has access to it.
+The container calls `http://my.worker` and the handler runs entirely inside the Workers runtime, outside of the container sandbox.
 
 <Render file="outbound-by-host-dns-note" product="containers" />
 
@@ -65,7 +60,7 @@ If you define both, `outboundByHost` handlers take precedence over the catch-all
 
 ## Use Workers bindings in handlers
 
-Outbound Workers have full access to your Worker's bindings. This lets you route container traffic to internal platform resources without managing API credentials.
+Outbound handlers have access to your Worker's bindings. Route container traffic to internal platform resources without changing application code.
 
 ```js
 export class MyContainer extends Container {
@@ -87,23 +82,24 @@ export class MyContainer extends Container {
 }
 ```
 
-The container calls `http://my.kv/some-key` and the outbound handler resolves it using the KV binding. No credentials leave the Worker.
+The container calls `http://my.kv/some-key` and the outbound handler resolves it using the KV binding.
 
-## Apply per-instance rules
+## Access Durable Object state
 
-The `ctx` argument exposes `containerId`, which lets you apply different rules per sandbox or container instance.
+The `ctx` argument exposes `containerId`, which lets you interact with the container's own Durable Object from an outbound handler.
 
 ```js
-"api.internal.example.com": async (request, env, ctx) => {
-  const authKey = await env.KEYS.get(ctx.containerId);
-  if (!authKey) {
-    return new Response("Forbidden", { status: 403 });
-  }
-  const headers = new Headers(request.headers);
-  headers.set("x-auth-token", authKey);
-  return fetch(new Request(request, { headers }));
+"get-state.do": async (request, env, ctx) => {
+  const id = env.MY_CONTAINER.idFromString(ctx.containerId);
+  const stub = env.MY_CONTAINER.get(id);
+  // Assumes getStateForKey is defined on your DO
+  return stub.getStateForKey(request.body);
 },
 ```
+
+:::note
+You can also use `containerId` to apply different rules per container instance — for example, to look up per-instance configuration from KV.
+:::
 
 ## Change policies at runtime
 
@@ -194,12 +190,14 @@ const updated = this.ctx.exports.MyOutboundWorker({
 await this.ctx.container.interceptOutboundHttp("203.0.113.0/24", updated);
 ```
 
+The `Container` class will call these methods automatically when using the various functions shown above.
+
 ## Local development
 
 `wrangler dev` supports outbound interception. A sidecar process ([`proxy-everything`](https://github.com/cloudflare/proxy-everything)) is spawned inside the container's network namespace. It applies `TPROXY` rules to route matching traffic to the local Workerd instance, mirroring production behavior.
 
 ## Related resources
 
-- [Outbound Workers for Sandboxes](/sandbox/guides/outbound-workers/) — Sandbox SDK API for outbound handlers
-- [Environment variables and secrets](/containers/platform-details/environment-variables/) — Store credentials for use in handlers
+- [Control outbound traffic (Sandboxes)](/sandbox/guides/outbound-workers/) — Sandbox SDK API for outbound handlers
+- [Environment variables and secrets](/containers/platform-details/environment-variables/) — Configure secrets and environment variables
 - [Durable Object interface](/durable-objects/api/container/) — Full `ctx.container` API reference

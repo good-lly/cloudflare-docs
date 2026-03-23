@@ -12,14 +12,15 @@ Outbound Workers intercept HTTP requests made by code running inside a sandbox. 
 
 Use outbound Workers to:
 
-- Inject credentials without exposing secrets to untrusted code or the LLM
+- Call Workers functions and access bindings (KV, R2, other Workers) from sandbox code
 - Log or audit every outbound request
 - Restrict which domains or HTTP methods are allowed
-- Route sandbox requests to internal Workers bindings (KV, R2, other Workers)
 - Swap egress policies at runtime
 
-:::note[HTTP only]
-Outbound Workers currently intercept HTTP traffic only. HTTPS interception is not yet supported. Set `enableInternet: false` and allow only proxied HTTP traffic until TLS support is available.
+:::note[TLS support coming soon]
+Outbound Workers currently intercept HTTP traffic only. HTTPS interception is in progress and coming soon. This will enable using Workers as a transparent proxy for credential injection.
+
+Even though this is using HTTP, traffic is secure and sandbox-to-Worker communication happens on the same machine. You can also upgrade to TLS from the Worker itself if needed.
 :::
 
 ## Define an outbound handler
@@ -50,48 +51,47 @@ import { Sandbox } from "@cloudflare/sandbox";
 
 export class MySandbox extends Sandbox {
   static outboundByHost = {
-    "api.internal.example.com": async (request: Request, env: Env, ctx: OutboundHandlerContext) => {
-      const headers = new Headers(request.headers);
-      headers.set("x-auth-token", env.SECRET);
-      return fetch(new Request(request, { headers }));
+    "my.worker": async (request: Request, env: Env, ctx: OutboundHandlerContext) => {
+      // Run arbitrary Workers logic from this hostname
+      return await someWorkersFunction(request.body);
     },
   };
 }
 ```
 </TypeScriptExample>
 
-Any HTTP request from the sandbox to `api.internal.example.com` is routed through the handler. The secret is injected by the Worker — the sandbox code never has access to it.
+The sandbox calls `http://my.worker` and the handler runs entirely inside the Workers runtime, outside of the sandbox.
 
 <Render file="outbound-by-host-dns-note" product="containers" />
 
 If you define both, `outboundByHost` handlers take precedence over the catch-all `outbound` handler.
 
-## Inject credentials per sandbox instance
+## Access Durable Object state
 
-The `ctx` argument exposes `containerId`, which lets you apply different credentials per sandbox. This is useful when each user or agent session should have distinct access.
+The `ctx` argument exposes `containerId`, which lets you interact with the sandbox's own Durable Object from an outbound handler.
 
 <TypeScriptExample>
 ```ts
 export class MySandbox extends Sandbox {
   static outboundByHost = {
-    "api.internal.example.com": async (request: Request, env: Env, ctx: { containerId: string }) => {
-      // Look up per-instance credentials (KV is encrypted at rest and in transit)
-      const authKey = await env.KEYS.get(ctx.containerId);
-      if (!authKey) {
-        return new Response("Forbidden", { status: 403 });
-      }
-      const headers = new Headers(request.headers);
-      headers.set("x-auth-token", authKey);
-      return fetch(new Request(request, { headers }));
+    "get-state.do": async (request: Request, env: Env, ctx: { containerId: string }) => {
+      const id = env.MY_SANDBOX.idFromString(ctx.containerId);
+      const stub = env.MY_SANDBOX.get(id);
+      // Assumes getStateForKey is defined on your DO
+      return stub.getStateForKey(request.body);
     },
   };
 }
 ```
 </TypeScriptExample>
 
+:::note
+You can also use `containerId` to apply different rules per sandbox instance — for example, to look up per-instance configuration from KV.
+:::
+
 ## Route traffic to Workers bindings
 
-Outbound Workers have full access to your Worker's bindings. Route sandbox traffic to internal platform resources without exposing credentials to the sandbox.
+Outbound Workers have full access to your Worker's bindings. Route sandbox traffic to internal platform resources without changing application code.
 
 <TypeScriptExample>
 ```ts
@@ -116,7 +116,7 @@ export class MySandbox extends Sandbox {
 ```
 </TypeScriptExample>
 
-The sandbox calls `http://my.kv/config-key` and the outbound handler resolves it using the KV binding. No API credentials ever reach the untrusted sandbox.
+The sandbox calls `http://my.kv/config-key` and the outbound handler resolves it using the KV binding.
 
 ## Change policies at runtime
 
@@ -173,7 +173,7 @@ In local development, `wrangler dev` mirrors this behavior using a sidecar proce
 
 ## Related resources
 
-- [Outbound Workers for Containers](/containers/platform-details/outbound-workers/) — Low-level `ctx.container` API
+- [Control outbound traffic (Containers)](/containers/platform-details/outbound-traffic/) — Low-level `ctx.container` API
 - [Sandbox options](/sandbox/configuration/sandbox-options/) — Configure sandbox behavior
 - [Environment variables](/sandbox/configuration/environment-variables/) — Store secrets for use in handlers
 ```
